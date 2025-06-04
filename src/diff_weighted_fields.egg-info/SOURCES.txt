@@ -1,0 +1,14 @@
+LICENSE
+README.md
+setup.py
+src/diff_weighted_fields/LPT.py
+src/diff_weighted_fields/__init__.py
+src/diff_weighted_fields/field.py
+src/diff_weighted_fields/generators.py
+src/diff_weighted_fields/grid.py
+src/diff_weighted_fields/utils.py
+src/diff_weighted_fields.egg-info/PKG-INFO
+src/diff_weighted_fields.egg-info/SOURCES.txt
+src/diff_weighted_fields.egg-info/dependency_links.txt
+src/diff_weighted_fields.egg-info/requires.txt
+src/diff_weighted_fields.egg-info/top_level.txt
