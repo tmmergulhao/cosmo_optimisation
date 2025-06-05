@@ -161,7 +161,7 @@ def PowerSpectrum_batch(delta_k_batch: jnp.ndarray, W: jnp.ndarray, grid) -> jnp
 
     # Safe‐divide by W for compensation (avoid tiny denominators)
     eps = 1e-3
-    safe_W = jnp.where(jnp.abs(W_batch) < eps, 1.0, W_batch)
+    safe_W = jnp.where(jnp.abs(W) < eps, 1.0, W)
     field_k_abs = field_k_abs / safe_W / safe_W  # still shape (..., N)
 
     # Flatten every leading batch dimension into a single axis of length B
