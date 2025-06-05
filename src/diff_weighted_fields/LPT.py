@@ -40,7 +40,7 @@ class Zeldovich1D(Field1D):
         N_fine = self.fine_grid.shape[0]
         self._q = jnp.linspace(0.0, self.fine_grid.L, num=N_fine, endpoint=False)
         self.scheme = scheme
-    @jax.jit
+    
     def make_realization(self, D, theta, noise, displacement = False) -> Zeldovich1D:
 
         # 1. Generate linear density on the fine grid:
