@@ -2,6 +2,7 @@
 import jax
 import jax.numpy as jnp
 from jax import random
+from functools import partial
 
 def cic_paint_1d(positions: jnp.ndarray, grid) -> jnp.ndarray:
     """
@@ -150,3 +151,36 @@ def PowerSpectrum(fieldA, fieldB, compensate = False):
     pk = jnp.real(jnp.where(counts > 0, power / counts, 0.0))
     pk = pk * H**Ndim
     return pk
+
+def PowerSpectrum_batch(delta_k_batch: jnp.ndarray, W: jnp.ndarray, grid) -> jnp.ndarray:
+    # Number of k‐bins
+    nbins = len(grid.k_edges) - 1
+
+    # Compute |δₖ|² for each batch entry
+    field_k_abs = delta_k_batch * jnp.conjugate(delta_k_batch)  # shape (..., N)
+
+    # Safe‐divide by W for compensation (avoid tiny denominators)
+    eps = 1e-3
+    safe_W = jnp.where(jnp.abs(W_batch) < eps, 1.0, W_batch)
+    field_k_abs = field_k_abs / safe_W / safe_W  # still shape (..., N)
+
+    # Flatten every leading batch dimension into a single axis of length B
+    batch_shape = field_k_abs.shape[:-1]
+    N = field_k_abs.shape[-1]
+    flat_field = field_k_abs.reshape((-1, N))  # shape (B, N)
+
+    # k_mapping: shape (N,) with bin indices or −1 for “ignore”
+    k_mapping = grid.k_mapping
+    valid = k_mapping >= 0
+    kmap_safe = jnp.where(valid, k_mapping, 0)
+
+    def ps_single(field_row):
+        # Mask out invalid entries
+        masked = jnp.where(valid, field_row, 0.0)
+        counts = jnp.bincount(kmap_safe, weights=valid.astype(field_row.dtype), length=nbins)
+        power  = jnp.bincount(kmap_safe, weights=masked,     length=nbins)
+        pk     = jnp.real(jnp.where(counts > 0, power / counts, 0.0))
+        return pk * (grid.H ** grid.Ndim)
+    
+    pk_flat = jax.vmap(ps_single)(flat_field)  # shape (B, nbins)
+    return pk_flat.reshape(batch_shape + (nbins,))

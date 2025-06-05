@@ -87,7 +87,7 @@ class Field1D():
     def tree_flatten(self):
         # Gather only non-None leaves
         leaves = []
-        is_present = [False, False, False, False]  # flags for (delta, delta_k, W)
+        is_present = [False, False, False]  # flags for (delta, delta_k, one_plus_delta)
         if self.delta is not None:
             leaves.append(self.delta)
             is_present[0] = True
@@ -97,11 +97,7 @@ class Field1D():
         if self.one_plus_delta is not None:
             leaves.append(self.one_plus_delta)
             is_present[2] = True
-        if self.W is not None:
-            leaves.append(self.W)
-            is_present[3] = True
-        
-        # Aux data: include grid, scheme, and presence flags
+        # We do NOT store W as a leaf; the smoothing kernel is in grid
         aux_data = (self.grid, self.scheme, tuple(is_present))
         return tuple(leaves), aux_data
 
@@ -130,10 +126,6 @@ class Field1D():
         else:
             obj.one_plus_delta = None
 
-        if is_present[3]:
-            obj.W = children[idx]
-            idx += 1
-        else:
-            obj.W = None
-
+        # We no longer store W as a leaf; the smoothing kernel is in grid
+        obj.W = None
         return obj

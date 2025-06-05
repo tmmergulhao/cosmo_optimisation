@@ -75,7 +75,7 @@ class GaussianFieldGenerator1D:
         field = Field1D(grid=self.grid)
         field.assign_from_k(delta_k)
         return field
-
+    
     # ---------------- PyTree registration ----------------
     def tree_flatten(self) -> Tuple[Tuple[jnp.ndarray, ...], Tuple[Any, Any]]:
         """
