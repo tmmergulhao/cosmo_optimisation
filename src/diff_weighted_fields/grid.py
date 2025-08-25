@@ -43,72 +43,89 @@ class Grid1D:
 
     def __post_init__(self):
         object.__setattr__(self, 'Ndim', len(self.shape))
-        object.__setattr__(self, 'H', self.L / jnp.array(self.shape))
-        object.__setattr__(self, 'Vol', self.L ** self.Ndim)
-        object.__setattr__(self, 'kf', 2 * jnp.pi / self.L)
-        object.__setattr__(self, 'kNyq', jnp.pi / self.H[0])
+        object.__setattr__(self, 'H', (self.L / jnp.array(self.shape)).astype(jnp.float64))
+        object.__setattr__(self, 'Vol', jnp.float64(self.L ** self.Ndim))
+        object.__setattr__(self, 'kf', jnp.float64(2 * jnp.pi / self.L))
+        object.__setattr__(self, 'kNyq', (jnp.pi / self.H[0]).astype(jnp.float64))
         object.__setattr__(self, 'N', self.shape[0])
-        object.__setattr__(self, 'norm_fft', 1.0 / jnp.sqrt(self.N**self.Ndim))
-        object.__setattr__(self, 'norm_ifft', jnp.sqrt(self.N**self.Ndim))
+        object.__setattr__(self, 'norm_fft', jnp.float64(1.0 / jnp.sqrt(self.N**self.Ndim)))
+        object.__setattr__(self, 'norm_ifft', jnp.float64(jnp.sqrt(self.N**self.Ndim)))
 
         # Initialize Lagrangian coordinates
-        q = jnp.linspace(0, self.L, self.N, endpoint=False)
+        q = jnp.linspace(0, self.L, self.N, endpoint=False, dtype=jnp.float64)
         object.__setattr__(self, 'q', q)
 
         # Initialize Fourier-space arrays
         kgrid = jnp.fft.fftfreq(self.shape[0], d=self.H) * 2 * jnp.pi
-        kgrid = kgrid.at[0].set(1e-12)
+        kgrid = kgrid.at[0].set(jnp.float64(1e-12))
         kgrid2 = kgrid**2
-        kgrid2 = kgrid2.at[0].set(1e-12)
+        kgrid2 = kgrid2.at[0].set(jnp.float64(1e-12))
         kgrid_abs = jnp.abs(kgrid)
-        kgrid_abs = kgrid_abs.at[0].set(1e-12)
+        kgrid_abs = kgrid_abs.at[0].set(jnp.float64(1e-12))
 
-        object.__setattr__(self, 'kgrid', kgrid)
-        object.__setattr__(self, 'kgrid2', kgrid2)
-        object.__setattr__(self, 'kgrid_abs', kgrid_abs)
-        object.__setattr__(self, 'q', jnp.linspace(0, self.L, self.shape[0], endpoint=False))
+        object.__setattr__(self, 'kgrid', kgrid.astype(jnp.float64))
+        object.__setattr__(self, 'kgrid2', kgrid2.astype(jnp.float64))
+        object.__setattr__(self, 'kgrid_abs', kgrid_abs.astype(jnp.float64))
+        object.__setattr__(self, 'q', jnp.linspace(0, self.L, self.shape[0], endpoint=False, dtype=jnp.float64))
 
         # Initialize the grid smoothing kernels
         if self.R_gauss > 0.0:
-            gauss_kernel = jnp.exp(-0.5 * (kgrid * self.R_gauss * self.H)**2)
-            object.__setattr__(self, 'GRID_SMOOTHING_KERNEL', gauss_kernel)
-            print(f"Using Gaussian smoothing with R_gauss = {self.R_gauss}")
+            physical_R_smooth = float(self.R_gauss * self.H[0])
+            k_smooth = jnp.pi/physical_R_smooth
+            gauss_kernel = jnp.exp(-0.5 * (self.kgrid_abs /k_smooth)**2)
+            object.__setattr__(self, 'GRID_SMOOTHING_KERNEL', gauss_kernel.astype(jnp.float64))
+            print(f"Using smoothing smoothing with R_gauss = {self.R_gauss} cells (physical = {physical_R_smooth}); k_smooth = {float(k_smooth):.3e}")
         elif self.R_clip > 0.0:
-            # interpret R_clip as number of grid cells (physical length = R_clip * H[0])
-            physical_R = float(self.R_clip * self.H[0])
-            k_clip = 2 * jnp.pi / physical_R
-            clip_kernel = jnp.where(self.kgrid_abs <= k_clip, 1, 0)
-            object.__setattr__(self, 'GRID_SMOOTHING_KERNEL', clip_kernel)
-            print(f"Using clipping smoothing with R_clip = {self.R_clip} cells (physical = {physical_R}); k_clip = {float(k_clip):.3e}")
+            physical_R_smooth = float(self.R_clip * self.H[0])
+            k_smooth = jnp.pi/physical_R_smooth
+
+            clip_kernel = jnp.where(self.kgrid_abs <= k_smooth, 1, 0)
+            object.__setattr__(self, 'GRID_SMOOTHING_KERNEL', clip_kernel.astype(jnp.float64))
+            print(f"Using clipping smoothing with R_clip = {self.R_clip} cells (physical = {physical_R_smooth}); k_smooth = {float(k_smooth):.3e}")
         else:
-            object.__setattr__(self, 'GRID_SMOOTHING_KERNEL', jnp.ones_like(kgrid))
+            object.__setattr__(self, 'GRID_SMOOTHING_KERNEL', jnp.ones_like(kgrid, dtype=jnp.float64))
             print("Warning: No smoothing applied, GRID_SMOOTHING_KERNEL is set to ones.")
 
         if self.kmin is None:
-            object.__setattr__(self, 'kmin', self.kf)
+            object.__setattr__(self, 'kmin', float(self.kf))
         else:
-            object.__setattr__(self, 'kmin', max(self.kf, self.kmin * self.kf))
+            object.__setattr__(self, 'kmin', max(float(self.kf), float(self.kmin * self.kf)))
 
         if self.kmax is None:
-            object.__setattr__(self, 'kmax', self.kNyq)
+            object.__setattr__(self, 'kmax', float(self.kNyq))
         else:
-            object.__setattr__(self, 'kmax', self.kmax * self.kNyq)
+            object.__setattr__(self, 'kmax', float(self.kmax * self.kNyq))
 
         if self.dk is None:
-            object.__setattr__(self, 'dk', 2 * self.kf)
+            object.__setattr__(self, 'dk', float(2 * self.kf))
         else:
-            object.__setattr__(self, 'dk', max(self.dk * self.kf, 2 * self.kf))
+            object.__setattr__(self, 'dk', max(float(self.dk * self.kf), float(2 * self.kf)))
 
-        print(f"kmin: {self.kmin}")
-        print(f"kmax: {self.kmax}")
-        print(f"dk: {self.dk}")
-
-        object.__setattr__(self, 'k_edges', jnp.arange(self.kmin, self.kmax + self.dk, self.dk))
-        object.__setattr__(self, 'k_ctrs', (self.k_edges[:-1] + self.k_edges[1:]) / 2)
+        object.__setattr__(self, 'k_edges', jnp.arange(self.kmin, self.kmax + self.dk, self.dk, dtype=jnp.float64))
+        object.__setattr__(self, 'k_ctrs', ((self.k_edges[:-1] + self.k_edges[1:]) / 2).astype(jnp.float64))
         bin_indices = jnp.searchsorted(self.k_edges, self.kgrid_abs, side='right') - 1
         valid = (bin_indices >= 0) & (bin_indices < len(self.k_edges) - 1)
         bin_assignment = jnp.where(valid, bin_indices, -1).reshape(-1)
         object.__setattr__(self, 'k_mapping', bin_assignment)
+
+    def __str__(self):
+        smoothing_type = "Gaussian" if self.R_gauss > 0.0 else "Clipping" if self.R_clip > 0.0 else "None"
+        smoothing_info = f"Using {smoothing_type} smoothing"
+        if self.R_gauss > 0.0:
+            smoothing_info += f" with R_gauss = {self.R_gauss}"
+        elif self.R_clip > 0.0:
+            smoothing_info += f" with R_clip = {self.R_clip}"
+
+        return (
+            f"{smoothing_info}\n"
+            f"kmin: {self.kmin}\n"
+            f"kmax: {self.kmax}\n"
+            f"dk: {self.dk}\n"
+            f"N: {self.N}\n"
+            f"Shape: {self.shape}\n"
+            f"L: {self.L}\n"
+            f"Volume: {self.Vol}\n"
+        )
 
     def generate_hermitian_noise(self, key: jnp.ndarray) -> jnp.ndarray:
         """
@@ -132,11 +149,12 @@ class Grid1D:
 
         # 1) Draw independent standard normals for real and imaginary parts
         key_r, key_i = random.split(key)
-        noise_real = random.normal(key_r, shape=(N,))
-        noise_imag = random.normal(key_i, shape=(N,))
+        noise_real = random.normal(key_r, shape=(N,), dtype=jnp.float64)
+        noise_imag = random.normal(key_i, shape=(N,), dtype=jnp.float64)
 
         # 2) Combine into a complex array
         noise_k = noise_real + 1j * noise_imag
+        noise_k = noise_k.astype(jnp.complex128)
 
         # 3) Enforce Hermitian symmetry:
 

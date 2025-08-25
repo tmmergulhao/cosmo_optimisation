@@ -55,18 +55,22 @@ class GaussianFieldGenerator1D:
                 "If you need to generate a batch, wrap this function in jax.vmap."
             )
 
+        noise_k = noise_k.astype(jnp.complex128)
+
         # Number of dimensions (1D)
         Ndim = self.grid.Ndim
 
         # 1) Compute P(k) at each FFT mode |k|. Always feed Pk the positive |k|.
         k_abs = self.grid.kgrid_abs       # shape: (N,)
         Pk_at_modes = self.Pk_func(k_abs, theta)  # shape: (N,)
+        Pk_at_modes = Pk_at_modes.astype(jnp.float64)
 
         Hscalar = self.grid.H[0]
 
         # 3) Amplitude = sqrt(P(k) / (2 * H^Ndim)) * smoothing kernel
         amp = jnp.sqrt(Pk_at_modes / (2.0 * Hscalar**Ndim)) \
               * self.grid.GRID_SMOOTHING_KERNEL  # shape: (N,)
+        amp = amp.astype(jnp.float64)
 
         # 4) Scale noise: delta_k = amp * noise_k
         delta_k = amp * noise_k  # shape: (N,)

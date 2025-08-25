@@ -1,0 +1,42 @@
+# thesis.mplstyle
+
+# figure
+figure.figsize           : 6, 4
+figure.dpi               : 200
+figure.constrained_layout.use : True
+
+# fonts
+font.family              : serif
+font.serif               : Times New Roman
+font.size                : 16
+
+# axes
+axes.titlesize           : 16
+axes.labelsize           : 16
+axes.spines.top          : True
+axes.spines.right        : True
+
+# major ticks
+xtick.major.size         : 5
+ytick.major.size         : 5
+xtick.major.width        : 1.0
+ytick.major.width        : 1.0
+
+# minor ticks
+xtick.minor.visible      : True
+ytick.minor.visible      : True
+xtick.minor.size         : 3
+ytick.minor.size         : 3
+xtick.minor.width        : 0.8
+ytick.minor.width        : 0.8
+
+xtick.direction          : in
+ytick.direction          : in
+
+# lines & markers
+lines.linewidth          : 2
+lines.markersize         : 6
+
+# legend
+legend.fontsize          : 12
+legend.frameon           : False

@@ -1,4 +1,3 @@
-# src/diff_weighted_fields/field.py
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, Any
 import jax.numpy as jnp
@@ -27,6 +26,7 @@ class Field1D():
         N = self.grid.shape[0]
         if arr.shape != (N,):
             raise ValueError(f"Expected real‐space array of shape {(N,)}, got {arr.shape}")
+        arr = arr.astype(jnp.float64)
         self.delta = arr
         self.delta_k = None  # invalidate any previous Fourier‐space data
 
@@ -37,6 +37,7 @@ class Field1D():
         if self.delta is None:
             raise ValueError("No real‐space field (self.delta) has been assigned.")
         # Compute the FFT:
+        self.delta = self.delta.astype(jnp.float64)
         self.delta_k = jnp.fft.fft(self.delta) * self.grid.norm_fft
 
     def assign_from_k(self, arr_k: jnp.ndarray) -> None:
@@ -47,6 +48,7 @@ class Field1D():
         N = self.grid.shape[0]
         if arr_k.shape != (N,):
             raise ValueError(f"Expected Fourier‐space array of shape {(N,)}, got {arr_k.shape}")
+        arr_k = arr_k.astype(jnp.complex128)
         self.delta_k = arr_k
         self.delta = None  # invalidate any previous real‐space data
 
@@ -57,7 +59,7 @@ class Field1D():
         if self.delta_k is None:
             raise ValueError("No Fourier‐space field (self.delta_k) has been assigned.")
         # Inverse FFT and take the real part:
-        self.delta = jnp.fft.ifft(self.delta_k).real * self.grid.norm_ifft
+        self.delta = jnp.fft.ifft(self.delta_k).real.astype(jnp.float64) * self.grid.norm_ifft
         
     def paint_from_positions(
         self,
@@ -71,17 +73,24 @@ class Field1D():
         Returns the real‐space density array of shape (N,) and caches it in self.delta.
         """
         if scheme == "cic":
-            one_plus_delta = cic_paint_1d(positions, self.grid)
+            _one_plus_delta = cic_paint_1d(positions, self.grid)
             self.W = jnp.sinc(self.grid.kgrid * self.grid.H / (2 * jnp.pi)) ** 2
         elif scheme == "tsc":
-            one_plus_delta = tsc_paint_1d(positions, self.grid)
+            _one_plus_delta = tsc_paint_1d(positions, self.grid)
             self.W = jnp.sinc(self.grid.kgrid * self.grid.H / (2 * jnp.pi)) ** 3
         else:
             raise ValueError(f"Unknown painting scheme: {scheme}")
         
-        self.one_plus_delta = one_plus_delta/jnp.mean(one_plus_delta)
-        self.delta = self.one_plus_delta - 1  # convert to overdensity
-        self.delta_k = None
+        _one_plus_delta = _one_plus_delta.astype(jnp.float64)
+        _one_plus_delta = _one_plus_delta/jnp.mean(_one_plus_delta)
+        _delta = _one_plus_delta - 1  # convert to overdensity
+
+        #self.delta = _delta # convert to overdensity
+        self.delta_k = jnp.fft.fft(_delta) * self.grid.norm_fft * self.grid.GRID_SMOOTHING_KERNEL
+        self.delta = jnp.fft.ifft(self.delta_k).real * self.grid.norm_ifft
+        
+        #self.delta_k = jnp.fft.fft(_delta) * self.grid.norm_fft * self.grid.GRID_SMOOTHING_KERNEL
+        #self.delta = jnp.fft.ifft(self.delta_k).real * self.grid.norm_ifft
 
     # ---------------- PyTree registration ----------------
     def tree_flatten(self):

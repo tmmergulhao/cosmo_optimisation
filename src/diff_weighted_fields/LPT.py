@@ -7,7 +7,8 @@ from .grid import Grid1D
 from .generators import GaussianFieldGenerator1D
 import jax
 import jax.numpy as jnp
-from .utils import PowerSpectrum_batch
+jax.config.update("jax_enable_x64", True)
+from .utils import PowerSpectrum_batch, MT2_pk_batch
 @jax.tree_util.register_pytree_node_class
 @dataclass(init=False)
 class Zeldovich1D(Field1D):
@@ -19,7 +20,7 @@ class Zeldovich1D(Field1D):
     def __init__(
         self,
         gaussian_gen: GaussianFieldGenerator1D,
-        paint_grid: Grid1D | None = None,
+        grid: Grid1D | None = None,
         scheme: str = "cic"
     ):
         """
@@ -33,16 +34,15 @@ class Zeldovich1D(Field1D):
         self.fine_grid = gaussian_gen.grid
 
         # The grid used for painting/FFT is either paint_grid or fine_grid:
-        self.paint_grid = paint_grid if paint_grid is not None else self.fine_grid
-        super().__init__(grid=self.paint_grid)
+        self.grid = grid if grid is not None else self.fine_grid
+        super().__init__(grid=self.grid)
 
         # Lagrangian coordinates always on the fine grid:
         N_fine = self.fine_grid.shape[0]
-        self._q = jnp.linspace(0.0, self.fine_grid.L, num=N_fine, endpoint=False)
+        self._q = jnp.linspace(0.0, self.fine_grid.L, num=N_fine, endpoint=False, dtype=jnp.float64)
         self.scheme = scheme
-    
-    def make_realization(self, D, theta, noise, displacement = False) -> Zeldovich1D:
 
+    def compute_displacement(self, theta, noise):
         # 1. Generate linear density on the fine grid:
         linear_field = self.gaussian_gen.make_realization_from_noise(theta, noise)
         delta_lin_k = linear_field.delta_k   # shape: (N,) complex
@@ -53,21 +53,21 @@ class Zeldovich1D(Field1D):
 
         # Compute displacement field in Fourier space
         psi_k = 1j * kgrid / (kgrid_abs**2) * delta_lin_k
-        psi_k = psi_k.at[0].set(0)
+        #psi_k = psi_k.at[0].set(0)
         psi_q = jnp.real(jnp.fft.ifft(psi_k) * self.fine_grid.norm_ifft)        
-        if displacement:
-            return psi_q
+        return psi_q
+    
+    def make_realization(self, D, theta, noise) -> Zeldovich1D:
+        #generate the displacement field and paint it onto the grid
+        psi_q = self.compute_displacement(theta, noise)
         x_eulerian = self._q + D * psi_q
-
-        # …paint, FFT, normalize, etc.…
         self.paint_from_positions(x_eulerian, scheme=self.scheme)
-        self.compute_fft()
         return self
     
     def make_realization_batch(self,D,theta,R_smooth,C,noise):
         gen = self.gaussian_gen            
-        kgrid     = self.fine_grid.kgrid           # shape: (N,)
-        kgrid_abs = self.fine_grid.kgrid_abs       # shape: (N,)
+        kgrid     = self.fine_grid.kgrid    
+        kgrid_abs = self.fine_grid.kgrid_abs
         kmesh_abs = self.grid.kgrid_abs
         def make_single(D,theta,noise):
             linear_field = gen.make_realization_from_noise(theta, noise)
@@ -81,7 +81,7 @@ class Zeldovich1D(Field1D):
             x_eulerian = self._q + D * psi_q
             self.paint_from_positions(x_eulerian, scheme=self.scheme)
             self.compute_fft()
-            return self.one_plus_delta, self.delta_k
+            return self.delta+1, self.delta_k
         
         # Vectorize over the first axis of noise:
         one_plus_delta_batch, delta_k_batch = jax.vmap(make_single, in_axes=(None, None, 0))(D, theta, noise)
@@ -97,8 +97,44 @@ class Zeldovich1D(Field1D):
         rho_bar = jnp.mean(rho_weighted, axis = -1)
         delta_weighted = rho_weighted/rho_bar[:,:,None] - 1
         delta_weighted_k = jnp.fft.fft(delta_weighted) * self.grid.norm_fft
-        return PowerSpectrum_batch(delta_weighted_k, jnp.ones_like(delta_weighted),self.grid)
+        return PowerSpectrum_batch(delta_weighted_k,delta_weighted_k, self.W,self.grid,compensate=True)
     
+    def make_realization_batch_2T(self,D,theta,R_smooth,C,noise):
+        gen = self.gaussian_gen            
+        kgrid     = self.fine_grid.kgrid    
+        kgrid_abs = self.fine_grid.kgrid_abs
+        kmesh_abs = self.grid.kgrid_abs
+        def make_single(D,theta,noise):
+            linear_field = gen.make_realization_from_noise(theta, noise)
+            delta_lin_k = linear_field.delta_k   # shape: (N,) complex
+
+            # Compute displacement field in Fourier space
+            psi_k = 1j * kgrid / (kgrid_abs**2) * delta_lin_k
+            psi_k = psi_k.at[0].set(0)
+            psi_q = jnp.real(jnp.fft.ifft(psi_k) * self.fine_grid.norm_ifft)        
+
+            x_eulerian = self._q + D * psi_q
+            self.paint_from_positions(x_eulerian, scheme=self.scheme)
+            self.compute_fft()
+            return self.delta+1, self.delta_k
+        
+        # Vectorize over the first axis of noise:
+        one_plus_delta_batch, delta_k_batch = jax.vmap(make_single, in_axes=(None, None, 0))(D, theta, noise)
+        delta_k_smooth_batch = delta_k_batch * jnp.exp(-0.5 * (kmesh_abs * R_smooth)**2)
+        delta_smooth_batch = jnp.fft.ifft(delta_k_smooth_batch).real * self.grid.norm_ifft
+        m_array = jnp.stack([delta_smooth_batch**0,
+                             delta_smooth_batch**1,
+                             delta_smooth_batch**2,
+                             delta_smooth_batch**3,])
+        
+        m_batch = jnp.einsum('tij,jlm->tilm', C, m_array)
+        rho_weighted = one_plus_delta_batch[None,None,:,:]*m_batch
+        rho_bar = jnp.mean(rho_weighted, axis = -1)
+        delta_weighted = rho_weighted/rho_bar[:,:,:,None] - 1
+        delta_weighted_k = jnp.fft.fft(delta_weighted) * self.grid.norm_fft
+        return MT2_pk_batch(delta_weighted_k,self.grid)
+    
+
     def ComputeBasis(self, Rsmooth) -> Zeldovich1D:
         """
         Smooth the field using a Gaussian kernel with standard deviation `sigma`.
@@ -106,16 +142,15 @@ class Zeldovich1D(Field1D):
         """
         delta_k_smooth = self.delta_k * jnp.exp(-0.5 * (self.grid.kgrid_abs * Rsmooth)**2)
         delta_smooth = jnp.fft.ifft(delta_k_smooth).real * self.grid.norm_ifft
-        self.m_array = jnp.stack([
-                                jnp.ones_like(delta_smooth), 
-                                delta_smooth,
-                                delta_smooth**2,
-                                delta_smooth**3,]
-                                , axis=0)
+        m1 = jnp.ones_like(delta_smooth)
+        m2 = delta_smooth
+        m3 = delta_smooth**2
+        m4 = delta_smooth**3
+        self.m_array = jnp.stack([m1,m2,m3,m4], axis=0)
         
     def WeightedChild(self, C):
         m = jnp.dot(C,self.m_array)
-        rho_weighted = m*self.one_plus_delta
+        rho_weighted = m*(self.delta+1)
         mean_rho_marked = jnp.mean(rho_weighted)
         delta_marked = rho_weighted / mean_rho_marked - 1.0
         field_marked = Field1D(grid=self.grid)
