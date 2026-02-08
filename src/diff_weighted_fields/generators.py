@@ -5,8 +5,8 @@ import jax.numpy as jnp
 from dataclasses import dataclass
 from typing import Callable, Any, Tuple
 
-from .grid import Grid1D
-from .field import Field1D
+from .grid import Grid1D, Grid3D
+from .field import Field1D, Field3D
 
 @jax.tree_util.register_pytree_node_class
 @dataclass
@@ -100,5 +100,48 @@ class GaussianFieldGenerator1D:
           - aux_data = (grid, Pk_func)
           - children = ()  (empty, because leaves=())
         """
+        grid, Pk_func = aux_data
+        return cls(grid=grid, Pk_func=Pk_func)
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass
+class GaussianFieldGenerator3D:
+    """
+    Generates 3D Gaussian random-field realizations from precomputed Hermitian-symmetric noise.
+    """
+
+    grid: Grid3D
+    Pk_func: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+
+    def make_realization_from_noise(
+        self, theta: jnp.ndarray, noise_k: jnp.ndarray
+    ) -> Field3D:
+        if noise_k.ndim != 3:
+            raise ValueError(
+                "make_realization_from_noise only supports 3D noise arrays. "
+                f"Got noise_k.ndim = {noise_k.ndim}."
+            )
+
+        noise_k = noise_k.astype(jnp.complex128)
+        k_abs = self.grid.kgrid_abs
+        Pk_at_modes = self.Pk_func(k_abs, theta).astype(jnp.float64)
+        Hscalar = self.grid.H[0]
+        amp = jnp.sqrt(Pk_at_modes / (2.0 * Hscalar**self.grid.Ndim)) \
+              * self.grid.GRID_SMOOTHING_KERNEL
+        delta_k = amp * noise_k
+        field = Field3D(grid=self.grid)
+        field.assign_from_k(delta_k)
+        return field
+
+    def tree_flatten(self) -> Tuple[Tuple[jnp.ndarray, ...], Tuple[Any, Any]]:
+        leaves = ()
+        aux_data = (self.grid, self.Pk_func)
+        return leaves, aux_data
+
+    @classmethod
+    def tree_unflatten(
+        cls, aux_data: Tuple[Any, Any], children: Tuple[jnp.ndarray, ...]
+    ) -> "GaussianFieldGenerator3D":
         grid, Pk_func = aux_data
         return cls(grid=grid, Pk_func=Pk_func)

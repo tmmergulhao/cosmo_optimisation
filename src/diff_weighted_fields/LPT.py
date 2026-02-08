@@ -2,9 +2,9 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from jax.tree_util import register_pytree_node_class
-from .field import Field1D
-from .grid import Grid1D
-from .generators import GaussianFieldGenerator1D
+from .field import Field1D, Field3D
+from .grid import Grid1D, Grid3D
+from .generators import GaussianFieldGenerator1D, GaussianFieldGenerator3D
 import jax
 import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
@@ -132,7 +132,8 @@ class Zeldovich1D(Field1D):
         rho_bar = jnp.mean(rho_weighted, axis = -1)
         delta_weighted = rho_weighted/rho_bar[:,:,:,None] - 1
         delta_weighted_k = jnp.fft.fft(delta_weighted) * self.grid.norm_fft
-        return MT2_pk_batch(delta_weighted_k,self.grid)
+        delta_weighted_k = jnp.swapaxes(delta_weighted_k, 0, 1)
+        return MT2_pk_batch(delta_weighted_k, self.grid)
     
 
     def ComputeBasis(self, Rsmooth) -> Zeldovich1D:
@@ -196,6 +197,178 @@ class Zeldovich1D(Field1D):
         obj._q = _q
         obj.scheme = scheme
         # Restore leaves
+        idx = 0
+        if is_present[0]:
+            obj.delta = children[idx]
+            idx += 1
+        else:
+            obj.delta = None
+        if is_present[1]:
+            obj.delta_k = children[idx]
+            idx += 1
+        else:
+            obj.delta_k = None
+        if is_present[2]:
+            obj.one_plus_delta = children[idx]
+            idx += 1
+        else:
+            obj.one_plus_delta = None
+        if is_present[3]:
+            obj.W = children[idx]
+            idx += 1
+        else:
+            obj.W = None
+        return obj
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(init=False)
+class Zeldovich3D(Field3D):
+    """
+    3D Zeldovich approximation initializer for two-tracer marked fields.
+    """
+
+    def __init__(
+        self,
+        gaussian_gen: GaussianFieldGenerator3D,
+        grid: Grid3D | None = None,
+        scheme: str = "cic"
+    ):
+        self.gaussian_gen = gaussian_gen
+        self.fine_grid = gaussian_gen.grid
+        self.grid = grid if grid is not None else self.fine_grid
+        super().__init__(grid=self.grid)
+
+        Nx, Ny, Nz = self.fine_grid.shape
+        qx = jnp.linspace(0.0, self.fine_grid.L, num=Nx, endpoint=False, dtype=jnp.float64)
+        qy = jnp.linspace(0.0, self.fine_grid.L, num=Ny, endpoint=False, dtype=jnp.float64)
+        qz = jnp.linspace(0.0, self.fine_grid.L, num=Nz, endpoint=False, dtype=jnp.float64)
+        qx, qy, qz = jnp.meshgrid(qx, qy, qz, indexing="ij")
+        self._q_flat = jnp.stack([qx.ravel(), qy.ravel(), qz.ravel()], axis=1)
+
+        kx, ky, kz = self.fine_grid.kgrid_components
+        k2 = kx**2 + ky**2 + kz**2
+        k2 = k2.at[0, 0, 0].set(jnp.float64(1e-12))
+        self._k_over_k2 = (kx / k2, ky / k2, kz / k2)
+        self.scheme = scheme
+
+    def compute_displacement(self, theta, noise):
+        linear_field = self.gaussian_gen.make_realization_from_noise(theta, noise)
+        delta_lin_k = linear_field.delta_k
+        kx_over_k2, ky_over_k2, kz_over_k2 = self._k_over_k2
+
+        psi_kx = 1j * kx_over_k2 * delta_lin_k
+        psi_ky = 1j * ky_over_k2 * delta_lin_k
+        psi_kz = 1j * kz_over_k2 * delta_lin_k
+        psi_kx = psi_kx.at[0, 0, 0].set(0)
+        psi_ky = psi_ky.at[0, 0, 0].set(0)
+        psi_kz = psi_kz.at[0, 0, 0].set(0)
+
+        psi_qx = jnp.real(jnp.fft.ifftn(psi_kx) * self.fine_grid.norm_ifft)
+        psi_qy = jnp.real(jnp.fft.ifftn(psi_ky) * self.fine_grid.norm_ifft)
+        psi_qz = jnp.real(jnp.fft.ifftn(psi_kz) * self.fine_grid.norm_ifft)
+        return psi_qx, psi_qy, psi_qz
+
+    def make_realization(self, D, theta, noise) -> Zeldovich3D:
+        psi_qx, psi_qy, psi_qz = self.compute_displacement(theta, noise)
+        psi_flat = jnp.stack([psi_qx.ravel(), psi_qy.ravel(), psi_qz.ravel()], axis=1)
+        x_eulerian = self._q_flat + D * psi_flat
+        self.paint_from_positions(x_eulerian, scheme=self.scheme)
+        return self
+
+    def make_realization_batch_2T(self, D, theta, R_smooth, C, noise):
+        gen = self.gaussian_gen
+        kmesh_abs = self.grid.kgrid_abs
+
+        def make_single(D, theta, noise):
+            linear_field = gen.make_realization_from_noise(theta, noise)
+            delta_lin_k = linear_field.delta_k
+            kx_over_k2, ky_over_k2, kz_over_k2 = self._k_over_k2
+
+            psi_kx = 1j * kx_over_k2 * delta_lin_k
+            psi_ky = 1j * ky_over_k2 * delta_lin_k
+            psi_kz = 1j * kz_over_k2 * delta_lin_k
+            psi_kx = psi_kx.at[0, 0, 0].set(0)
+            psi_ky = psi_ky.at[0, 0, 0].set(0)
+            psi_kz = psi_kz.at[0, 0, 0].set(0)
+
+            psi_qx = jnp.real(jnp.fft.ifftn(psi_kx) * self.fine_grid.norm_ifft)
+            psi_qy = jnp.real(jnp.fft.ifftn(psi_ky) * self.fine_grid.norm_ifft)
+            psi_qz = jnp.real(jnp.fft.ifftn(psi_kz) * self.fine_grid.norm_ifft)
+            psi_flat = jnp.stack([psi_qx.ravel(), psi_qy.ravel(), psi_qz.ravel()], axis=1)
+
+            x_eulerian = self._q_flat + D * psi_flat
+            self.paint_from_positions(x_eulerian, scheme=self.scheme)
+            self.compute_fft()
+            return self.delta + 1, self.delta_k
+
+        one_plus_delta_batch, delta_k_batch = jax.vmap(
+            make_single, in_axes=(None, None, 0)
+        )(D, theta, noise)
+
+        delta_k_smooth_batch = delta_k_batch * jnp.exp(-0.5 * (kmesh_abs * R_smooth) ** 2)
+        delta_smooth_batch = jnp.fft.ifftn(delta_k_smooth_batch, axes=(1, 2, 3)).real * self.grid.norm_ifft
+        m_array = jnp.stack([
+            delta_smooth_batch ** 0,
+            delta_smooth_batch ** 1,
+            delta_smooth_batch ** 2,
+            delta_smooth_batch ** 3,
+        ])
+
+        m_batch = jnp.einsum('tc,cbxyz->tbxyz', C, m_array)
+        rho_weighted = one_plus_delta_batch[None, ...] * m_batch
+        rho_bar = jnp.mean(rho_weighted, axis=(2, 3, 4))
+        delta_weighted = rho_weighted / rho_bar[:, :, None, None, None] - 1
+        delta_weighted_k = jnp.fft.fftn(delta_weighted, axes=(2, 3, 4)) * self.grid.norm_fft
+        delta_weighted_k = jnp.swapaxes(delta_weighted_k, 0, 1)
+        return MT2_pk_batch(delta_weighted_k, self.grid)
+
+    def tree_flatten(self):
+        leaves = []
+        is_present = [False, False, False, False]
+        if self.delta is not None:
+            leaves.append(self.delta)
+            is_present[0] = True
+        if self.delta_k is not None:
+            leaves.append(self.delta_k)
+            is_present[1] = True
+        if self.one_plus_delta is not None:
+            leaves.append(self.one_plus_delta)
+            is_present[2] = True
+        if self.W is not None:
+            leaves.append(self.W)
+            is_present[3] = True
+        aux_data = (
+            self.gaussian_gen,
+            self.fine_grid,
+            self.grid,
+            self._q_flat,
+            self._k_over_k2,
+            self.scheme,
+            tuple(is_present),
+        )
+        return tuple(leaves), aux_data
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        (
+            gaussian_gen,
+            fine_grid,
+            grid,
+            q_flat,
+            k_over_k2,
+            scheme,
+            is_present,
+        ) = aux_data
+        obj = cls.__new__(cls)
+        Field3D.__init__(obj, grid=grid)
+        obj.gaussian_gen = gaussian_gen
+        obj.fine_grid = fine_grid
+        obj.grid = grid
+        obj._q_flat = q_flat
+        obj._k_over_k2 = k_over_k2
+        obj.scheme = scheme
+
         idx = 0
         if is_present[0]:
             obj.delta = children[idx]
