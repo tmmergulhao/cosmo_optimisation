@@ -45,6 +45,48 @@ def cic_paint_batch_1d(
     # We map over axis 0 of positions_batch, keeping `grid` fixed.
     return jax.vmap(lambda pos: cic_paint_1d(pos, grid), in_axes=(0))(positions_batch)
 
+def cic_paint_3d(positions: jnp.ndarray, grid) -> jnp.ndarray:
+    """
+    Standard 3D CIC deposit:
+    - positions: array of shape (M, 3) with values in [0, L) in each dim.
+    - grid: a Grid3D instance with attributes shape and H.
+
+    Returns density array of shape (Nx, Ny, Nz).
+    """
+    Nx, Ny, Nz = grid.shape
+    dx, dy, dz = grid.H
+    density_flat = jnp.zeros((Nx * Ny * Nz,), dtype=jnp.float64)
+
+    indices = positions / jnp.array([dx, dy, dz])
+    i_left = jnp.floor(indices).astype(int)
+    delta = indices - i_left
+
+    wx0 = 1.0 - delta[:, 0]
+    wy0 = 1.0 - delta[:, 1]
+    wz0 = 1.0 - delta[:, 2]
+    wx1 = delta[:, 0]
+    wy1 = delta[:, 1]
+    wz1 = delta[:, 2]
+
+    ix0 = i_left[:, 0]
+    iy0 = i_left[:, 1]
+    iz0 = i_left[:, 2]
+
+    def add_corner(ix, iy, iz, w):
+        idx = (ix % Nx) * (Ny * Nz) + (iy % Ny) * Nz + (iz % Nz)
+        return density_flat.at[idx].add(w)
+
+    density_flat = add_corner(ix0, iy0, iz0, wx0 * wy0 * wz0)
+    density_flat = add_corner(ix0 + 1, iy0, iz0, wx1 * wy0 * wz0)
+    density_flat = add_corner(ix0, iy0 + 1, iz0, wx0 * wy1 * wz0)
+    density_flat = add_corner(ix0, iy0, iz0 + 1, wx0 * wy0 * wz1)
+    density_flat = add_corner(ix0 + 1, iy0 + 1, iz0, wx1 * wy1 * wz0)
+    density_flat = add_corner(ix0 + 1, iy0, iz0 + 1, wx1 * wy0 * wz1)
+    density_flat = add_corner(ix0, iy0 + 1, iz0 + 1, wx0 * wy1 * wz1)
+    density_flat = add_corner(ix0 + 1, iy0 + 1, iz0 + 1, wx1 * wy1 * wz1)
+
+    return density_flat.reshape((Nx, Ny, Nz))
+
 def tsc_paint_1d(positions: jnp.ndarray, grid) -> jnp.ndarray:
     """
     Fully differentiable 1D TSC (triangular‐shaped–cloud) mass assignment.
@@ -126,8 +168,7 @@ def tsc_paint_1d(positions: jnp.ndarray, grid) -> jnp.ndarray:
 def PowerSpectrum(fieldA, fieldB, compensate = False):
     deltakA, WA = fieldA.delta_k, fieldA.W
     deltakB, WB = fieldB.delta_k, fieldB.W
-    H = fieldA.grid.H
-    Ndim = fieldA.grid.Ndim
+    cell_volume = jnp.prod(fieldA.grid.H)
     nbins = len(fieldA.grid.k_edges) - 1
     field_k_abs = deltakA * jnp.conjugate(deltakB)
     if compensate:
@@ -149,7 +190,7 @@ def PowerSpectrum(fieldA, fieldB, compensate = False):
     power = jnp.bincount(k_mapping, weights=field_flat, length=nbins)
     
     pk = jnp.real(jnp.where(counts > 0, power / counts, 0.0))
-    pk = pk * H**Ndim
+    pk = pk * cell_volume
     return pk.astype(jnp.float64)
 
 def PowerSpectrum_batch(
@@ -176,10 +217,9 @@ def PowerSpectrum_batch(
         safe_WB = jnp.where(jnp.abs(WB) < eps, 1.0, WB)
         field_k = field_k / safe_WA / safe_WB
 
-    # flatten batch dims
-    batch_shape = field_k.shape[:-1]
-    N = field_k.shape[-1]
-    flat_field = field_k.reshape((-1, N))  # (B, N)
+    # flatten batch dims and spatial dims
+    batch_shape = field_k.shape[:-grid.Ndim]
+    flat_field = field_k.reshape((-1, grid.size))  # (B, Ntot)
 
     # binning setup
     nbins = len(grid.k_edges) - 1
@@ -192,7 +232,7 @@ def PowerSpectrum_batch(
         counts = jnp.bincount(kmap_safe, weights=valid.astype(row.dtype), length=nbins)
         power  = jnp.bincount(kmap_safe, weights=masked,               length=nbins)
         pk     = jnp.real(jnp.where(counts > 0, power / counts, 0.0))
-        return pk * (grid.H ** grid.Ndim)
+        return pk * jnp.prod(grid.H)
 
     pk_flat = jax.vmap(ps_single)(flat_field)  # (B, nbins)
     return pk_flat.reshape(batch_shape + (nbins,)).astype(jnp.float64)
@@ -1116,5 +1156,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-

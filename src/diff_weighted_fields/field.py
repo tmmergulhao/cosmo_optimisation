@@ -2,8 +2,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple, Any
 import jax.numpy as jnp
 import jax
-from .grid import Grid1D
-from .utils import cic_paint_1d, tsc_paint_1d, cic_paint_batch_1d
+from .grid import Grid1D, Grid3D
+from .utils import cic_paint_1d, tsc_paint_1d, cic_paint_batch_1d, cic_paint_3d
 
 @jax.tree_util.register_pytree_node_class
 @dataclass()
@@ -136,5 +136,105 @@ class Field1D():
             obj.one_plus_delta = None
 
         # We no longer store W as a leaf; the smoothing kernel is in grid
+        obj.W = None
+        return obj
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass()
+class Field3D():
+    """
+    Base class for 3D fields.
+    """
+    grid: Grid3D
+    delta: Optional[jnp.ndarray] = field(default=None, init=False)
+    delta_k: Optional[jnp.ndarray] = field(default=None, init=False)
+    one_plus_delta: Optional[jnp.ndarray] = field(default=None, init=False)  # density field
+    W: Optional[jnp.ndarray] = field(default=None, init=False)  # CIC window function
+    scheme: str = field(default="cic", init=True, repr=False)
+
+    def assign_from_real_space(self, arr: jnp.ndarray) -> None:
+        if arr.shape != self.grid.shape:
+            raise ValueError(f"Expected real-space array of shape {self.grid.shape}, got {arr.shape}")
+        self.delta = arr.astype(jnp.float64)
+        self.delta_k = None
+
+    def compute_fft(self) -> jnp.ndarray:
+        if self.delta is None:
+            raise ValueError("No real-space field (self.delta) has been assigned.")
+        self.delta = self.delta.astype(jnp.float64)
+        self.delta_k = jnp.fft.fftn(self.delta) * self.grid.norm_fft
+
+    def assign_from_k(self, arr_k: jnp.ndarray) -> None:
+        if arr_k.shape != self.grid.shape:
+            raise ValueError(f"Expected Fourier-space array of shape {self.grid.shape}, got {arr_k.shape}")
+        self.delta_k = arr_k.astype(jnp.complex128)
+        self.delta = None
+
+    def compute_ifft(self) -> jnp.ndarray:
+        if self.delta_k is None:
+            raise ValueError("No Fourier-space field (self.delta_k) has been assigned.")
+        self.delta = jnp.fft.ifftn(self.delta_k).real.astype(jnp.float64) * self.grid.norm_ifft
+
+    def paint_from_positions(
+        self,
+        positions: jnp.ndarray,
+        scheme: str = "cic",
+    ) -> jnp.ndarray:
+        if scheme != "cic":
+            raise ValueError(f"Unknown painting scheme: {scheme}")
+        _one_plus_delta = cic_paint_3d(positions, self.grid)
+        kx, ky, kz = self.grid.kgrid_components
+        wx = jnp.sinc(kx * self.grid.H[0] / (2 * jnp.pi)) ** 2
+        wy = jnp.sinc(ky * self.grid.H[1] / (2 * jnp.pi)) ** 2
+        wz = jnp.sinc(kz * self.grid.H[2] / (2 * jnp.pi)) ** 2
+        self.W = wx * wy * wz
+        _one_plus_delta = _one_plus_delta.astype(jnp.float64)
+        _one_plus_delta = _one_plus_delta / jnp.mean(_one_plus_delta)
+        _delta = _one_plus_delta - 1
+
+        self.delta_k = jnp.fft.fftn(_delta) * self.grid.norm_fft * self.grid.GRID_SMOOTHING_KERNEL
+        self.delta = jnp.fft.ifftn(self.delta_k).real * self.grid.norm_ifft
+
+    def tree_flatten(self):
+        leaves = []
+        is_present = [False, False, False]
+        if self.delta is not None:
+            leaves.append(self.delta)
+            is_present[0] = True
+        if self.delta_k is not None:
+            leaves.append(self.delta_k)
+            is_present[1] = True
+        if self.one_plus_delta is not None:
+            leaves.append(self.one_plus_delta)
+            is_present[2] = True
+        aux_data = (self.grid, self.scheme, tuple(is_present))
+        return tuple(leaves), aux_data
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        grid, scheme, is_present = aux_data
+        obj = cls(grid=grid)
+        obj.scheme = scheme
+
+        idx = 0
+        if is_present[0]:
+            obj.delta = children[idx]
+            idx += 1
+        else:
+            obj.delta = None
+
+        if is_present[1]:
+            obj.delta_k = children[idx]
+            idx += 1
+        else:
+            obj.delta_k = None
+
+        if is_present[2]:
+            obj.one_plus_delta = children[idx]
+            idx += 1
+        else:
+            obj.one_plus_delta = None
+
         obj.W = None
         return obj
